@@ -179,6 +179,47 @@ class QualityChecker:
         'sdr': 0,
     }
 
+    # -------------------------------------------------- audio tracks / languages
+    # Spoken-language names seen in release titles. Only 3+ letter forms are
+    # listed: two-letter ISO codes ("it", "de", "es", "hi", "ja") collide with
+    # ordinary words far too often to be safe. Releases that use ISO codes
+    # almost always also carry a "Multi" marker, which is handled separately.
+    LANGUAGE_TOKENS = (
+        'english', 'eng', 'hindi', 'hin', 'bengali', 'bangla', 'ben',
+        'tamil', 'tam', 'telugu', 'tel', 'malayalam', 'mal', 'kannada', 'kan',
+        'marathi', 'punjabi', 'gujarati', 'urdu', 'nepali',
+        'italian', 'ita', 'spanish', 'spa', 'french', 'fre', 'fra', 'vff', 'vfq',
+        'german', 'ger', 'deu', 'russian', 'rus', 'ukrainian', 'ukr',
+        'korean', 'kor', 'japanese', 'jpn', 'chinese', 'chi', 'mandarin', 'cantonese',
+        'portuguese', 'por', 'dutch', 'polish', 'pol', 'turkish', 'tur',
+        'arabic', 'ara', 'thai', 'tha', 'vietnamese', 'vie', 'indonesian',
+        'tagalog', 'filipino', 'czech', 'hungarian', 'hun', 'swedish', 'swe',
+        'danish', 'dan', 'norwegian', 'finnish', 'fin', 'greek', 'gre',
+        'hebrew', 'heb', 'persian', 'farsi',
+    )
+
+    # Explicit "more than one audio track" markers.
+    # 'multi' is rejected when it is really "Multi Subs" (subtitles, not audio).
+    _MULTI_AUDIO_RE = re.compile(
+        r'(?<![a-z0-9])(?:'
+        r'multi(?:\d+)?(?![a-z0-9])(?!\s+subs?(?![a-z0-9]))'
+        r'|dual(?:\s*audio)?(?![a-z0-9])'
+        r'|\d\s*audios?(?![a-z0-9])'
+        r')'
+    )
+
+    # Bonus points for carrying more than one audio track. Deliberately small:
+    # enough to break a tie between two otherwise identical files, not enough
+    # to override a genuine source or resolution difference.
+    MULTI_AUDIO_BONUS = 8       # exactly two languages, or a "Dual Audio" tag
+    MULTI_AUDIO_BONUS_MANY = 12  # three or more languages, or a "Multi" tag
+
+    # Optional: languages this instance cares about keeping. Empty by default so
+    # behaviour is unchanged; set e.g. ('hindi', 'bengali') in a fork to make the
+    # checker protect files that carry those tracks.
+    PREFERRED_LANGUAGES: tuple = ()
+    PREFERRED_LANGUAGE_BONUS = 6
+
     # Sources that imply decent audio even with no audio tag in the filename
     _BLURAY_SOURCES = ('remux', 'bdremux', 'bluray', 'blu-ray', 'brrip', 'bdrip',
                        'bd', 'bd25', 'bd50', 'bdiso', 'uhd', '4k')
@@ -263,6 +304,25 @@ class QualityChecker:
 
         is_10bit = bool(QualityChecker._10BIT_RE.search(name))
 
+        # --- audio tracks / languages -------------------------------------
+        languages = sorted(
+            lang for lang in QualityChecker.LANGUAGE_TOKENS
+            if QualityChecker._token_pattern(lang).search(name)
+        )
+        has_multi_marker = bool(QualityChecker._MULTI_AUDIO_RE.search(name))
+
+        if len(languages) >= 3 or has_multi_marker:
+            multi_audio_bonus = QualityChecker.MULTI_AUDIO_BONUS_MANY
+        elif len(languages) == 2:
+            multi_audio_bonus = QualityChecker.MULTI_AUDIO_BONUS
+        else:
+            multi_audio_bonus = 0
+
+        if QualityChecker.PREFERRED_LANGUAGES and any(
+            lang in languages for lang in QualityChecker.PREFERRED_LANGUAGES
+        ):
+            multi_audio_bonus += QualityChecker.PREFERRED_LANGUAGE_BONUS
+
         result = {
             'source': source,
             'source_score': source_score,
@@ -277,6 +337,9 @@ class QualityChecker:
             'hdr_score': hdr_score,
             'is_10bit': is_10bit,
             'bitrate_bonus': 5 if is_10bit else 0,
+            'languages': languages,
+            'is_multi_audio': multi_audio_bonus > 0,
+            'multi_audio_bonus': multi_audio_bonus,
         }
 
         # Assume sane audio for good sources that simply carry no audio tag,
@@ -300,6 +363,7 @@ class QualityChecker:
             + parsed_quality['resolution_score']
             + parsed_quality['hdr_score']
             + parsed_quality['bitrate_bonus']
+            + parsed_quality.get('multi_audio_bonus', 0)
         )
 
     @staticmethod
@@ -334,6 +398,9 @@ class QualityChecker:
             parsed['audio'] or '',
             parsed['hdr'] or '',
         ]
+        langs = parsed.get('languages') or []
+        if langs:
+            parts.append('[' + '+'.join(langs) + ']')
         return ' '.join(p for p in parts if p)
 
     # ------------------------------------------------------------------------
@@ -374,14 +441,16 @@ class QualityChecker:
         LOGGER.info(
             f"    Score: {old_total} (source:{old['source_score']}/tier:{old['source_tier']}, "
             f"codec:{old['codec_score']}, audio:{old['audio_score']}, "
-            f"res:{old['resolution_score']}, hdr:{old['hdr_score']}, 10bit:{old['bitrate_bonus']})"
+            f"res:{old['resolution_score']}, hdr:{old['hdr_score']}, 10bit:{old['bitrate_bonus']}, "
+            f"tracks:{old['multi_audio_bonus']} {old['languages'] or '-'})"
         )
         LOGGER.info(f"    Size: {existing_size} ({old_mb:.2f} MB)")
         LOGGER.info(f"  New: {new_filename}")
         LOGGER.info(
             f"    Score: {new_total} (source:{new['source_score']}/tier:{new['source_tier']}, "
             f"codec:{new['codec_score']}, audio:{new['audio_score']}, "
-            f"res:{new['resolution_score']}, hdr:{new['hdr_score']}, 10bit:{new['bitrate_bonus']})"
+            f"res:{new['resolution_score']}, hdr:{new['hdr_score']}, 10bit:{new['bitrate_bonus']}, "
+            f"tracks:{new['multi_audio_bonus']} {new['languages'] or '-'})"
         )
         LOGGER.info(f"    Size: {new_size} ({new_mb:.2f} MB)")
 
@@ -423,7 +492,16 @@ class QualityChecker:
             return True, reason
 
         if new_total == old_total:
-            # --- 4. Tie -> prefer the smaller file --------------------------
+            # --- 4. Tie -> never trade audio tracks away for a smaller file --
+            # A dropped language track cannot be recovered; disk space can.
+            if old['is_multi_audio'] and not new['is_multi_audio']:
+                reason = (f"SKIP - Existing file carries more audio tracks "
+                          f"({'+'.join(old['languages']) or 'multi'} vs "
+                          f"{'+'.join(new['languages']) or 'single'})")
+                LOGGER.warning(f"  Decision: {reason}")
+                return False, reason
+
+            # --- 5. Otherwise prefer the smaller file -----------------------
             if new_mb > 0 and old_mb > 0:
                 if new_mb < old_mb:
                     reason = (f"REPLACE - Same quality, smaller file "
