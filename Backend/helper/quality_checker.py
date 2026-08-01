@@ -57,21 +57,31 @@ class QualityChecker:
 
         # Disc
         'bluray': 100, 'blu-ray': 100, 'brrip': 100, 'bdrip': 100,
-        'bd': 100, 'uhd': 100, '4k': 100,
+        'bd': 100, 'bd25': 100, 'bd50': 100, 'bdiso': 100,
+        'uhd': 100, '4k': 100,
+
+        # Digital Cinema Package (theatrical master) - between web and disc
+        'dcprip': 88, 'dcp': 88,
 
         # Web (untouched stream from a streaming service)
         'web-dl': 85, 'webdl': 85,
-        'dsnp': 85, 'nf': 85, 'amzn': 85,      # Disney+, Netflix, Amazon
-        'atvp': 85, 'aptv': 85,                # Apple TV+
-        'hmax': 85, 'hbo': 85,                 # HBO Max
         'web': 80,                             # bare "WEB" tag
-        'webrip': 75, 'web-rip': 75,
+        # Streaming-platform tags. Scored just under WEB-DL and just over
+        # WEBRip: they identify the platform, not the extraction method.
+        'dsnp': 78, 'nf': 78, 'amzn': 78,      # Disney+, Netflix, Amazon
+        'atvp': 78, 'aptv': 78, 'itunes': 78,  # Apple TV+ / iTunes
+        'hmax': 78, 'hbo': 78,                 # HBO Max
+        'zee5': 78, 'hotstar': 78, 'sonyliv': 78, 'jio': 78,
+        'hulu': 78, 'pcok': 78, 'pmtp': 78, 'stan': 78, 'crav': 78,
+        'webrip': 75, 'web-rip': 75, 'webrp': 75,   # 'webrp' = common typo
+        'web-dlrip': 70, 'webdlrip': 70,
 
         # Re-encodes / broadcast
         'dvdrip': 60, 'dvd-rip': 60,
         'uhdrip': 58,
-        'hdrip': 55, 'hd-rip': 55,
+        'hdrip': 55, 'hd-rip': 55, 'vodrip': 55,
         'hdtv': 50, 'hdtvrip': 50,
+        'tvrip': 45, 'satrip': 45, 'iptv': 45, 'dthrip': 45,
 
         # Screeners
         'dvdscr': 40, 'screener': 40, 'scr': 40,
@@ -84,46 +94,59 @@ class QualityChecker:
         'ts': 15, 'telesync': 15,
 
         # Bottom of the barrel
-        'predvd': 10, 'workprint': 10, 'ppv': 10, 'vhsrip': 5,
+        'predvd': 10, 'pdvd': 10, 'workprint': 10, 'ppv': 10, 'vhsrip': 5,
     }
 
     # Hard hierarchy. Higher tier ALWAYS beats lower tier, whatever the extras.
     SOURCE_TIERS = {
-        4: ('remux', 'bdremux', 'bluray', 'blu-ray', 'brrip', 'bdrip', 'bd', 'uhd', '4k'),
-        3: ('web-dl', 'webdl', 'dsnp', 'nf', 'amzn', 'atvp', 'aptv', 'hmax', 'hbo',
-            'web', 'webrip', 'web-rip'),
-        2: ('dvdrip', 'dvd-rip', 'uhdrip', 'hdrip', 'hd-rip', 'hdtv', 'hdtvrip'),
+        4: ('remux', 'bdremux', 'bluray', 'blu-ray', 'brrip', 'bdrip',
+            'bd', 'bd25', 'bd50', 'bdiso', 'uhd', '4k'),
+        3: ('dcprip', 'dcp',
+            'web-dl', 'webdl', 'web',
+            'dsnp', 'nf', 'amzn', 'atvp', 'aptv', 'itunes', 'hmax', 'hbo',
+            'zee5', 'hotstar', 'sonyliv', 'jio', 'hulu', 'pcok', 'pmtp',
+            'stan', 'crav',
+            'webrip', 'web-rip', 'webrp', 'web-dlrip', 'webdlrip'),
+        2: ('dvdrip', 'dvd-rip', 'uhdrip', 'hdrip', 'hd-rip', 'vodrip',
+            'hdtv', 'hdtvrip', 'tvrip', 'satrip', 'iptv', 'dthrip'),
         1: ('dvdscr', 'screener', 'scr', 'r5'),
         0: ('hdtc', 'telecine', 'tc', 'hdcam', 'hd-cam', 'hdts', 'hd-ts',
             'cam', 'camrip', 'cam-rip', 'ts', 'telesync',
-            'predvd', 'workprint', 'ppv', 'vhsrip'),
+            'predvd', 'pdvd', 'workprint', 'ppv', 'vhsrip'),
     }
 
     # ----------------------------------------------------------------- codecs
     CODEC_RANKINGS = {
+        'vvc': 22, 'h266': 22, 'h.266': 22, 'x266': 22,
         'h265': 20, 'hevc': 20, 'x265': 20, 'h.265': 20,
         'av1': 18,
         'h264': 15, 'x264': 15, 'h.264': 15, 'avc': 15,
         'vp9': 12,
+        'vc1': 10, 'vc-1': 10,
         'xvid': 8,
         'divx': 5,
-        'mpeg': 3,
+        'mpeg': 3, 'mpeg2': 3, 'mpeg-2': 3,
     }
 
     # ------------------------------------------------------------------ audio
     AUDIO_RANKINGS = {
         'atmos': 100, 'dolby atmos': 100,
+        'lpcm': 98, 'pcm': 98,
         'truehd': 95, 'dts-hd': 95, 'dts-hd ma': 95,
-        'ddp': 90, 'dd+': 90, 'eac3': 90,
-        'dts-x': 88,
+        'flac': 92,
+        'ddp': 90, 'dd+': 90, 'eac3': 90, 'e-ac3': 90, 'eac-3': 90,
+        'dts-x': 88, 'dts:x': 88, 'dts-es': 88,
         'dts': 85,
         'ddp5.1': 85, 'dd+5.1': 85,
         '7.1': 85, '7.1ch': 85, '8ch': 85,
-        'dd5.1': 80, 'dd 5.1': 80, 'ac3': 80, 'dolby digital': 80,
+        'dd5.1': 80, 'dd 5.1': 80, 'ac3': 80, 'ac-3': 80, 'dolby digital': 80,
+        'aac7.1': 70, 'aac 7.1': 70,
         '5.1': 70, '5.1ch': 70, '6ch': 70,          # channel-only tags
         'aac5.1': 65, 'aac 5.1': 65,
         'opus': 60,
+        'vorbis': 55,
         'aac2.0': 50, 'aac 2.0': 50, 'aac': 50,
+        'dd2.0': 45, 'dd 2.0': 45,
         'mp3': 40,
         'stereo': 35, '2.0': 35, '2.0ch': 35, '2ch': 35,
         'mono': 20,
@@ -149,7 +172,7 @@ class QualityChecker:
 
     # -------------------------------------------------------------------- HDR
     HDR_RANKINGS = {
-        'dolby vision': 18, 'dv': 18,
+        'dolby vision': 18, 'dovi': 18, 'dv': 18,
         'hdr10+': 15, 'hdr10plus': 15,
         'hdr10': 12, 'hdr': 12,
         'hlg': 10,
@@ -157,9 +180,13 @@ class QualityChecker:
     }
 
     # Sources that imply decent audio even with no audio tag in the filename
-    _BLURAY_SOURCES = ('remux', 'bdremux', 'bluray', 'blu-ray', 'brrip', 'bdrip', 'bd', 'uhd', '4k')
-    _WEBDL_SOURCES = ('web-dl', 'webdl', 'web', 'dsnp', 'nf', 'amzn', 'atvp', 'aptv', 'hmax', 'hbo')
-    _WEBRIP_SOURCES = ('webrip', 'web-rip')
+    _BLURAY_SOURCES = ('remux', 'bdremux', 'bluray', 'blu-ray', 'brrip', 'bdrip',
+                       'bd', 'bd25', 'bd50', 'bdiso', 'uhd', '4k')
+    _WEBDL_SOURCES = ('dcprip', 'dcp', 'web-dl', 'webdl', 'web',
+                      'dsnp', 'nf', 'amzn', 'atvp', 'aptv', 'itunes', 'hmax', 'hbo',
+                      'zee5', 'hotstar', 'sonyliv', 'jio', 'hulu', 'pcok', 'pmtp',
+                      'stan', 'crav')
+    _WEBRIP_SOURCES = ('webrip', 'web-rip', 'webrp', 'web-dlrip', 'webdlrip')
 
     _pattern_cache: Dict[str, "re.Pattern"] = {}
 
