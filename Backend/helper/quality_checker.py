@@ -352,6 +352,19 @@ class QualityChecker:
             elif source in QualityChecker._WEBRIP_SOURCES:
                 result['audio'], result['audio_score'] = 'assumed-stereo', 45
 
+        # Same idea for a missing codec tag. A blank codec used to score 0,
+        # which silently penalised perfectly good releases that just don't put
+        # "x264"/"x265" in the filename - e.g.
+        #   "GoT.S01E01.1080p.10Bit.Bluray.Hindi.English.Esubs.mkv"
+        # lost to an HEVC release by 2 points purely for the missing tag.
+        # Missing should mean "unknown", not "worst possible".
+        if result['codec_score'] == 0 and result['source_tier'] is not None \
+                and result['source_tier'] >= 2:
+            # 10-bit distribution releases are overwhelmingly HEVC; without
+            # that hint assume a plain AVC-class encode.
+            result['codec'] = 'assumed-hevc' if is_10bit else 'assumed-avc'
+            result['codec_score'] = 18 if is_10bit else 15
+
         return result
 
     @staticmethod
