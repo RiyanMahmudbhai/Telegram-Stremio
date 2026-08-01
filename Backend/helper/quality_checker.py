@@ -1,6 +1,25 @@
 """
 Quality Hierarchy System for comparing video qualities
 Prevents accidental replacement of high-quality videos with lower quality
+
+v1.1 - Fixes over v1.0:
+  * Token matching is now word-boundary aware. Previously a plain substring
+    check caused false positives such as:
+      - "384Kbps" matching "4k"   -> scored as 2160p/UHD source
+      - "192Kbps" matching "2k"   -> scored as 1440p
+      - "Infinity" matching "nf"  -> scored as a Netflix WEB-DL
+      - "Camp"     matching "cam"
+      - "YTS"      matching "ts"
+      - "DVDRip"   matching "dv"  -> scored as Dolby Vision
+  * "uhd" removed from the resolution table. In practice "1080p UHD BluRay"
+    means a UHD-sourced 1080p encode, not a 2160p file; treating it as 2160p
+    made two same-label 1080p files score asymmetrically. It is still counted
+    as a top-tier *source*.
+  * Separators are normalised (dots/underscores/hyphens -> space) before
+    matching, so "web.dl", "web-dl", "WEB DL", "DD5.1" and "DD 5.1" all match
+    the same tokens without needing duplicate dictionary keys.
+  * Equal-size files are now reported as "identical size" instead of the
+    misleading "larger file (370.45MB > 370.45MB)".
 """
 
 import re
@@ -18,16 +37,16 @@ class QualityChecker:
     SOURCE_RANKINGS = {
         # Best Quality
         'bluray': 100, 'blu-ray': 100, 'brrip': 100, 'bdrip': 100,
-        'uhd': 100, '4k': 100,
+        'uhd': 100, '4k': 100, 'remux': 100,
 
         # Excellent Quality
-        'web-dl': 85, 'webdl': 85, 'web dl': 85, 'web.dl': 85,  # Added dot variant
-        'webrip': 75, 'web-rip': 75, 'web.rip': 75,  # Added dot variant
+        'web-dl': 85, 'webdl': 85,
+        'webrip': 75, 'web-rip': 75,
 
         # Streaming Platform WEB-DLs (same quality as generic WEB-DL)
-        'dsnp': 85, 'nf': 85, 'amzn': 85,  # Disney+, Netflix, Amazon (all WEB-DL quality)
-        'atvp': 85, 'aptv': 85,  # Apple TV+
-        'hmax': 85, 'hbo': 85,  # HBO Max
+        'dsnp': 85, 'nf': 85, 'amzn': 85,  # Disney+, Netflix, Amazon
+        'atvp': 85, 'aptv': 85,            # Apple TV+
+        'hmax': 85, 'hbo': 85,             # HBO Max
 
         # Good Quality
         'dvdrip': 60, 'dvd-rip': 60,
@@ -65,9 +84,10 @@ class QualityChecker:
         'atmos': 100, 'dolby atmos': 100,
         'truehd': 95, 'dts-hd': 95, 'dts-hd ma': 95,
         'ddp': 90, 'dd+': 90, 'eac3': 90,
-        'dts': 85, 'dts-x': 88,
-        'dd5.1': 80, 'dd 5.1': 80, 'ac3': 80, 'dolby digital': 80,
+        'dts-x': 88,
+        'dts': 85,
         'ddp5.1': 85, 'dd+5.1': 85,
+        'dd5.1': 80, 'dd 5.1': 80, 'ac3': 80, 'dolby digital': 80,
         'aac5.1': 65, 'aac 5.1': 65,
         'opus': 60,
         'aac2.0': 50, 'aac 2.0': 50, 'aac': 50,
@@ -77,13 +97,14 @@ class QualityChecker:
     }
 
     # Resolution Rankings (higher = better)
+    # NOTE: 'uhd' intentionally NOT here - see module docstring.
     RESOLUTION_RANKINGS = {
-        '2160p': 100, '4k': 100, 'uhd': 100,
+        '2160p': 100, '4k': 100,
         '1440p': 80, '2k': 80,
         '1080p': 70, 'fhd': 70,
-        '720p': 50, 'hd': 50,
+        '720p': 50,
         '576p': 35,
-        '480p': 30, 'sd': 30,
+        '480p': 30,
         '360p': 20,
         '240p': 10
     }
@@ -97,81 +118,97 @@ class QualityChecker:
         'sdr': 0
     }
 
+    # Sources that imply decent audio even when the filename carries no audio tag
+    _BLURAY_SOURCES = ('bluray', 'blu-ray', 'brrip', 'bdrip', 'uhd', '4k', 'remux')
+    _WEBDL_SOURCES = ('web-dl', 'webdl', 'dsnp', 'nf', 'amzn', 'atvp', 'aptv', 'hmax', 'hbo')
+    _WEBRIP_SOURCES = ('webrip', 'web-rip')
+
+    # Compiled-pattern cache so we build each regex only once
+    _pattern_cache: Dict[str, "re.Pattern"] = {}
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        """
+        Lowercase and collapse separators so that '.', '_', '-' and runs of
+        whitespace all become a single space. This lets one dictionary key
+        match 'WEB-DL', 'web.dl' and 'WEB DL' alike.
+        """
+        return re.sub(r'[\s._\-]+', ' ', text.lower()).strip()
+
+    @staticmethod
+    def _token_pattern(token: str) -> "re.Pattern":
+        """
+        Build (and cache) a word-boundary regex for a ranking key.
+
+        Boundaries are 'not alphanumeric' rather than \\b because many tokens
+        start or end with digits or symbols ('4k', '2.0', 'dd+', 'hdr10+'),
+        where \\b behaves inconsistently. This is what stops '384Kbps' from
+        matching '4k' and 'Infinity' from matching 'nf'.
+        """
+        cached = QualityChecker._pattern_cache.get(token)
+        if cached is not None:
+            return cached
+        normalized = QualityChecker._normalize(token)
+        pattern = re.compile(
+            r'(?<![a-z0-9])' + re.escape(normalized) + r'(?![a-z0-9])'
+        )
+        QualityChecker._pattern_cache[token] = pattern
+        return pattern
+
+    @staticmethod
+    def _best_match(normalized_name: str, rankings: Dict[str, int]) -> Tuple[Optional[str], int]:
+        """
+        Return the highest-scoring token from `rankings` present in the name.
+        """
+        best_token, best_score = None, 0
+        for token, score in rankings.items():
+            if score > best_score and QualityChecker._token_pattern(token).search(normalized_name):
+                best_token, best_score = token, score
+        return best_token, best_score
+
     @staticmethod
     def parse_filename(filename: str) -> Dict[str, any]:
         """
         Parse filename to extract quality indicators.
         Returns dict with source, codec, audio, resolution, hdr, etc.
         """
-        filename_lower = filename.lower()
+        name = QualityChecker._normalize(filename)
+
+        source, source_score = QualityChecker._best_match(name, QualityChecker.SOURCE_RANKINGS)
+        codec, codec_score = QualityChecker._best_match(name, QualityChecker.CODEC_RANKINGS)
+        audio, audio_score = QualityChecker._best_match(name, QualityChecker.AUDIO_RANKINGS)
+        resolution, resolution_score = QualityChecker._best_match(name, QualityChecker.RESOLUTION_RANKINGS)
+        hdr, hdr_score = QualityChecker._best_match(name, QualityChecker.HDR_RANKINGS)
+
+        is_10bit = bool(re.search(r'(?<![a-z0-9])10 ?bit(?![a-z0-9])', name))
 
         result = {
-            'source': None,
-            'source_score': 0,
-            'codec': None,
-            'codec_score': 0,
-            'audio': None,
-            'audio_score': 0,
-            'resolution': None,
-            'resolution_score': 0,
-            'hdr': None,
-            'hdr_score': 0,
-            'is_10bit': '10bit' in filename_lower or '10-bit' in filename_lower,
-            'bitrate_bonus': 0
+            'source': source,
+            'source_score': source_score,
+            'codec': codec,
+            'codec_score': codec_score,
+            'audio': audio,
+            'audio_score': audio_score,
+            'resolution': resolution,
+            'resolution_score': resolution_score,
+            'hdr': hdr,
+            'hdr_score': hdr_score,
+            'is_10bit': is_10bit,
+            'bitrate_bonus': 5 if is_10bit else 0,
         }
 
-        # Find video source
-        for source, score in QualityChecker.SOURCE_RANKINGS.items():
-            if source in filename_lower:
-                if score > result['source_score']:
-                    result['source'] = source
-                    result['source_score'] = score
-
-        # Find codec
-        for codec, score in QualityChecker.CODEC_RANKINGS.items():
-            if codec in filename_lower:
-                if score > result['codec_score']:
-                    result['codec'] = codec
-                    result['codec_score'] = score
-
-        # Find audio
-        for audio, score in QualityChecker.AUDIO_RANKINGS.items():
-            if audio in filename_lower:
-                if score > result['audio_score']:
-                    result['audio'] = audio
-                    result['audio_score'] = score
-
-        # Find resolution
-        for resolution, score in QualityChecker.RESOLUTION_RANKINGS.items():
-            if resolution in filename_lower:
-                if score > result['resolution_score']:
-                    result['resolution'] = resolution
-                    result['resolution_score'] = score
-
-        # Find HDR
-        for hdr, score in QualityChecker.HDR_RANKINGS.items():
-            if hdr in filename_lower:
-                if score > result['hdr_score']:
-                    result['hdr'] = hdr
-                    result['hdr_score'] = score
-
-        # 10-bit bonus
-        if result['is_10bit']:
-            result['bitrate_bonus'] = 5
-
-        # Default audio assumption for high-quality sources without explicit audio info
-        # This prevents WEB-DL/BluRay from losing to lower sources just because audio isn't in filename
+        # Default audio assumption for high-quality sources without explicit audio info.
+        # Prevents WEB-DL/BluRay from losing purely because audio isn't in the filename.
         if result['audio_score'] == 0:
-            # High-quality sources typically have at least DD5.1 or better
-            if result['source'] in ['bluray', 'blu-ray', 'brrip', 'bdrip', 'uhd', '4k']:
+            if source in QualityChecker._BLURAY_SOURCES:
                 result['audio'] = 'assumed-dd5.1'
-                result['audio_score'] = 80  # Assume standard DD5.1 for BluRay
-            elif result['source'] in ['web-dl', 'webdl', 'web dl', 'web.dl', 'dsnp', 'nf', 'amzn', 'atvp', 'aptv', 'hmax', 'hbo']:
+                result['audio_score'] = 80   # BluRay: assume standard DD5.1
+            elif source in QualityChecker._WEBDL_SOURCES:
                 result['audio'] = 'assumed-ddp'
-                result['audio_score'] = 85  # Streaming platforms typically use DD+ (EAC3)
-            elif result['source'] in ['webrip', 'web-rip', 'web.rip']:
+                result['audio_score'] = 85   # Streaming platforms typically ship DD+ (EAC3)
+            elif source in QualityChecker._WEBRIP_SOURCES:
                 result['audio'] = 'assumed-stereo'
-                result['audio_score'] = 45  # Conservative assumption for WEBRip
+                result['audio_score'] = 45   # Conservative assumption for WEBRip
 
         return result
 
@@ -180,7 +217,7 @@ class QualityChecker:
         """
         Calculate total quality score from parsed quality data.
         """
-        total = (
+        return (
             parsed_quality['source_score'] +
             parsed_quality['codec_score'] +
             parsed_quality['audio_score'] +
@@ -188,7 +225,6 @@ class QualityChecker:
             parsed_quality['hdr_score'] +
             parsed_quality['bitrate_bonus']
         )
-        return total
 
     @staticmethod
     def parse_file_size(size_str: str) -> float:
@@ -201,22 +237,34 @@ class QualityChecker:
 
         size_str = size_str.upper().replace(' ', '')
 
-        # Extract number
         match = re.search(r'([\d.]+)', size_str)
         if not match:
             return 0.0
 
-        size = float(match.group(1))
+        try:
+            size = float(match.group(1))
+        except ValueError:
+            return 0.0
 
-        # Convert to MB
-        if 'GB' in size_str:
-            size *= 1024
-        elif 'TB' in size_str:
+        if 'TB' in size_str:
             size *= 1024 * 1024
+        elif 'GB' in size_str:
+            size *= 1024
         elif 'KB' in size_str:
             size /= 1024
 
         return size
+
+    @staticmethod
+    def _describe(parsed: Dict) -> str:
+        parts = [
+            parsed['source'] or 'unknown',
+            parsed['resolution'] or '',
+            parsed['codec'] or '',
+            parsed['audio'] or '',
+            parsed['hdr'] or '',
+        ]
+        return ' '.join(p for p in parts if p)
 
     @staticmethod
     def compare_quality(
@@ -232,75 +280,65 @@ class QualityChecker:
             (should_replace: bool, reason: str)
 
         Logic:
-        1. If new quality score > existing: REPLACE (better quality)
-        2. If scores equal but new size < existing: REPLACE (same quality, smaller file)
-        3. If new quality score < existing: DON'T REPLACE (worse quality)
+        1. New score > existing        -> REPLACE (genuine upgrade)
+        2. Scores equal, new smaller   -> REPLACE (same quality, saves storage)
+        3. Scores equal, same/larger   -> SKIP
+        4. New score < existing        -> SKIP (protects the better file)
         """
-        # Parse both files
         existing_quality = QualityChecker.parse_filename(existing_filename)
         new_quality = QualityChecker.parse_filename(new_filename)
 
-        # Calculate scores
         existing_score = QualityChecker.calculate_total_score(existing_quality)
         new_score = QualityChecker.calculate_total_score(new_quality)
 
-        # Parse file sizes
         existing_size_mb = QualityChecker.parse_file_size(existing_size)
         new_size_mb = QualityChecker.parse_file_size(new_size)
 
-        # Log comparison
-        LOGGER.info(f"Quality Comparison:")
+        LOGGER.info("Quality Comparison:")
         LOGGER.info(f"  Existing: {existing_filename}")
         LOGGER.info(f"    Score: {existing_score} (source:{existing_quality['source_score']}, "
-                   f"codec:{existing_quality['codec_score']}, audio:{existing_quality['audio_score']}, "
-                   f"res:{existing_quality['resolution_score']}, hdr:{existing_quality['hdr_score']})")
+                    f"codec:{existing_quality['codec_score']}, audio:{existing_quality['audio_score']}, "
+                    f"res:{existing_quality['resolution_score']}, hdr:{existing_quality['hdr_score']}, "
+                    f"10bit:{existing_quality['bitrate_bonus']})")
         LOGGER.info(f"    Size: {existing_size} ({existing_size_mb:.2f} MB)")
         LOGGER.info(f"  New: {new_filename}")
         LOGGER.info(f"    Score: {new_score} (source:{new_quality['source_score']}, "
-                   f"codec:{new_quality['codec_score']}, audio:{new_quality['audio_score']}, "
-                   f"res:{new_quality['resolution_score']}, hdr:{new_quality['hdr_score']})")
+                    f"codec:{new_quality['codec_score']}, audio:{new_quality['audio_score']}, "
+                    f"res:{new_quality['resolution_score']}, hdr:{new_quality['hdr_score']}, "
+                    f"10bit:{new_quality['bitrate_bonus']})")
         LOGGER.info(f"    Size: {new_size} ({new_size_mb:.2f} MB)")
 
-        # Decision logic
         if new_score > existing_score:
-            reason = (f"✅ REPLACE - Better quality "
-                     f"(score: {new_score} > {existing_score})")
+            reason = f"REPLACE - Better quality (score: {new_score} > {existing_score})"
             LOGGER.info(f"  Decision: {reason}")
             return True, reason
 
-        elif new_score == existing_score:
-            # Same quality - prefer smaller file
+        if new_score == existing_score:
             if new_size_mb > 0 and existing_size_mb > 0:
                 if new_size_mb < existing_size_mb:
-                    size_diff = existing_size_mb - new_size_mb
-                    reason = (f"✅ REPLACE - Same quality, smaller file "
-                             f"({new_size_mb:.2f}MB < {existing_size_mb:.2f}MB, saves {size_diff:.2f}MB)")
+                    saved = existing_size_mb - new_size_mb
+                    reason = (f"REPLACE - Same quality, smaller file "
+                              f"({new_size_mb:.2f}MB < {existing_size_mb:.2f}MB, saves {saved:.2f}MB)")
                     LOGGER.info(f"  Decision: {reason}")
                     return True, reason
-                else:
-                    reason = (f"⏭️ SKIP - Same quality, but larger file "
-                             f"({new_size_mb:.2f}MB > {existing_size_mb:.2f}MB)")
+                if new_size_mb == existing_size_mb:
+                    reason = f"SKIP - Same quality and identical size ({new_size_mb:.2f}MB)"
                     LOGGER.info(f"  Decision: {reason}")
                     return False, reason
-            else:
-                # Can't compare size, allow replacement
-                reason = f"✅ REPLACE - Same quality, size unknown"
+                reason = (f"SKIP - Same quality, but larger file "
+                          f"({new_size_mb:.2f}MB > {existing_size_mb:.2f}MB)")
                 LOGGER.info(f"  Decision: {reason}")
-                return True, reason
+                return False, reason
 
-        else:  # new_score < existing_score
-            reason = (f"❌ SKIP - Lower quality detected! "
-                     f"(score: {new_score} < {existing_score})\n"
-                     f"Existing: {existing_quality['source'] or 'unknown'} "
-                     f"{existing_quality['resolution'] or ''} "
-                     f"{existing_quality['codec'] or ''} "
-                     f"{existing_quality['audio'] or ''}\n"
-                     f"New: {new_quality['source'] or 'unknown'} "
-                     f"{new_quality['resolution'] or ''} "
-                     f"{new_quality['codec'] or ''} "
-                     f"{new_quality['audio'] or ''}")
-            LOGGER.warning(f"  Decision: {reason}")
-            return False, reason
+            reason = "REPLACE - Same quality, size unknown"
+            LOGGER.info(f"  Decision: {reason}")
+            return True, reason
+
+        reason = (f"SKIP - Lower quality detected! (score: {new_score} < {existing_score})\n"
+                  f"Existing: {QualityChecker._describe(existing_quality)}\n"
+                  f"New: {QualityChecker._describe(new_quality)}")
+        LOGGER.warning(f"  Decision: {reason}")
+        return False, reason
 
     @staticmethod
     def should_replace_quality(
@@ -316,22 +354,22 @@ class QualityChecker:
 
         Args:
             existing_quality_label: Resolution label like "1080p", "720p"
-            existing_quality_name: Full filename
-            existing_quality_size: File size string like "2.5GB"
-            new_quality_label: Resolution label
-            new_quality_name: Full filename
-            new_quality_size: File size string
+            existing_quality_name:  Full filename
+            existing_quality_size:  File size string like "2.5GB"
+            new_quality_label:      Resolution label
+            new_quality_name:       Full filename
+            new_quality_size:       File size string
 
         Returns:
             (should_replace: bool, reason: str)
         """
-        # If different resolution labels, use old logic (always replace)
+        # Different resolution labels -> leave the host project's default behaviour alone.
         if existing_quality_label != new_quality_label:
-            reason = f"Different resolution ({existing_quality_label} vs {new_quality_label}) - using default replacement"
+            reason = (f"Different resolution ({existing_quality_label} vs {new_quality_label}) "
+                      f"- using default replacement")
             LOGGER.info(reason)
             return True, reason
 
-        # Same resolution label - use quality hierarchy
         return QualityChecker.compare_quality(
             existing_quality_name,
             existing_quality_size,
